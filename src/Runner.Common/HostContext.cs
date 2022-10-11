@@ -112,7 +112,10 @@ namespace GitHub.Runner.Common
                 }
 
                 // this should give us _diag folder under runner root directory
-                string diagLogDirectory = Path.Combine(new DirectoryInfo(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)).Parent.FullName, Constants.Path.DiagDirectory);
+                string diagLogDirectory = Path.Combine(
+                        Environment.GetEnvironmentVariable("SNAP_COMMON") != null ?
+                        Environment.GetEnvironmentVariable("SNAP_COMMON") : new DirectoryInfo(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)).Parent.FullName,
+                        Constants.Path.DiagDirectory);
                 _traceManager = new TraceManager(new HostTraceListener(diagLogDirectory, hostType, logPageSize, logRetentionDays), this.SecretMasker);
             }
             else
@@ -238,12 +241,15 @@ namespace GitHub.Runner.Common
 
                 case WellKnownDirectory.Externals:
                     path = Path.Combine(
-                        GetDirectory(WellKnownDirectory.Root),
+                        new DirectoryInfo(GetDirectory(WellKnownDirectory.Bin)).Parent.FullName,
                         Constants.Path.ExternalsDirectory);
                     break;
 
                 case WellKnownDirectory.Root:
-                    path = new DirectoryInfo(GetDirectory(WellKnownDirectory.Bin)).Parent.FullName;
+                    path = Environment.GetEnvironmentVariable("SNAP_COMMON");
+                    if (string.IsNullOrEmpty(path)) {
+                        path = new DirectoryInfo(GetDirectory(WellKnownDirectory.Bin)).Parent.FullName;
+                    }
                     break;
 
                 case WellKnownDirectory.Temp:

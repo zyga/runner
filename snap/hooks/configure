@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Zygmunt Krynicki <me@zygoon.pl>
+# SPDX-License-Identifier: MIT
+
+"""
+Snap hooks for the github-runner snap.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import typing
+
+import requests
+
+
+class SnapCtl:
+    """Control program for interacting with snapd from snaps."""
+
+    def __init__(self, tool: str = "snapctl") -> None:
+        self.tool = tool
+
+    def get(self, prop: str) -> str:
+        """
+        Get a given snap configuration value.
+
+        If the property is missing subprocess.CalledProcessError is raised.
+        """
+        return subprocess.check_output(
+            [self.tool, "get", prop], encoding="utf-8"
+        ).rstrip("\n")
+
+    def set(self, prop: str, value: str) -> None:
+        """Set a given snap configuration value."""
+        subprocess.check_call([self.tool, "set", "{}={}".format(prop, value)])
+
+    def stop(self, svc: str, *, disable: bool = False) -> None:
+        """Stop a given snap service."""
+        subprocess.check_call(
+            [self.tool, "stop", svc] + ["--disable"] if disable else []
+        )
+
+    def start(self, svc: str, *, enable: bool = False) -> None:
+        """Start a given snap service."""
+        subprocess.check_call(
+            [self.tool, "start", svc] + ["--enable"] if enable else []
+        )
+
+    def restart(self, svc: str) -> None:
+        """Restart a given snap service."""
+        subprocess.check_call([self.tool, "restart", svc])
+
+
+class Repository:
+    """GitHub repository."""
+
+    name: str
+    auth: requests.auth.AuthBase
+
+    def __init__(self, name: str, auth: requests.auth.AuthBase) -> None:
+        self.name = name
+        self.auth = auth
+
+    @property
+    def URL(self) -> str:
+        """URL of the repository."""
+        return "https://github.com/{}".format(self.name)
+
+    def runner_registration_token(self) -> str:
+        """
+        Obtain runner registration token.
+
+        The personal access token needs repo:org scope.
+        """
+        api_url = (
+            "https://api.github.com/repos/{}/actions/runners/registration-token".format(
+                self.name
+            )
+        )
+        resp = requests.post(api_url, auth=self.auth)
+        resp.raise_for_status()
+        return str(resp.json()["token"])
+
+    def runner_remove_token(self) -> str:
+        """
+        Obtain runner removal token.
+
+        The personal access token needs repo:org scope.
+        """
+        api_url = "https://api.github.com/repos/{}/actions/runners/remove-token".format(
+            self.name
+        )
+        resp = requests.post(api_url, auth=self.auth)
+        resp.raise_for_status()
+        return str(resp.json()["token"])
+
+
+class Organization:
+    """GitHub organization."""
+
+    name: str
+    auth: requests.auth.AuthBase
+
+    def __init__(self, name: str, auth: requests.auth.AuthBase) -> None:
+        self.name = name
+        self.auth = auth
+
+    @property
+    def URL(self) -> str:
+        """URL of the organization."""
+        return "https://github.com/{}".format(self.name)
+
+    def runner_registration_token(self) -> str:
+        """
+        Obtain runner registration.
+
+        The access token needs admin:org scope.
+        """
+        api_url = (
+            "https://api.github.com/orgs/{}/actions/runners/registration-token".format(
+                self.name
+            )
+        )
+        resp = requests.post(api_url, auth=self.auth)
+        resp.raise_for_status()
+        return str(resp.json()["token"])
+
+    def runner_remove_token(self) -> str:
+        """
+        Obtain runner removal token.
+
+        The personal access token needs repo:org scope.
+        """
+        api_url = "https://api.github.com/orgs/{}/actions/runners/remove-token".format(
+            self.name
+        )
+        resp = requests.post(api_url, auth=self.auth)
+        resp.raise_for_status()
+        return str(resp.json()["token"])
+
+
+class PersonalAccessTokenAuth(requests.auth.AuthBase):
+    """Authorization based on GitHub personal token."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
+        r.headers["Authorization"] = "token {}".format(self.token)
+        return r
+
+
+class GitHub:
+    """GitHub API."""
+
+    auth: requests.auth.AuthBase
+
+    def __init__(self, personal_access_token: str) -> None:
+        self.auth = PersonalAccessTokenAuth(personal_access_token)
+
+    def repo(self, name: str) -> Repository:
+        """Access specific repository."""
+        return Repository(name, self.auth)
+
+    def org(self, name: str) -> Organization:
+        """Access specific organization."""
+        return Organization(name, self.auth)
+
+
+class RunnerConfig:
+    """Representation of the ".runner" config file."""
+
+    def __init__(self, cfg: typing.Dict[str, typing.Any]) -> None:
+        self.cfg = cfg
+
+    @classmethod
+    def load(cls, path: str) -> RunnerConfig:
+        """Load runner configuration file from given path."""
+        with open(path, "rt", encoding="utf-8-sig") as f:
+            return cls(json.load(f))
+
+    @classmethod
+    def maybe_load(cls, path: str) -> typing.Optional[RunnerConfig]:
+        """Load runner configuration file from given path, if one exists."""
+        try:
+            return cls.load(path)
+        except FileNotFoundError:
+            return None
+
+    @property
+    def GitHubURL(self) -> str:
+        """URL of the GitHub entity runner is looking at."""
+        return str(self.cfg["gitHubUrl"])
+
+
+class Runner:
+    """Representation of the runner itself."""
+
+    def __init__(self, root_dir: str) -> None:
+        self.root_dir = root_dir
+
+    @property
+    def listener(self) -> str:
+        """Path of the Runner.Listener binary."""
+        return os.path.expandvars("${SNAP}/bin/Runner.Listener")
+
+    @property
+    def configuredURL(self) -> str:
+        """URL of the configured entity (repository or organization)."""
+        cfg = self.maybe_load_config()
+        if cfg is None:
+            return ""
+
+        return cfg.GitHubURL
+
+    def maybe_load_config(self) -> typing.Optional[RunnerConfig]:
+        return RunnerConfig.maybe_load(os.path.join(self.root_dir, ".runner"))
+
+    def unregister(self, gh: GitHub) -> None:
+        cfg = self.maybe_load_config()
+        if cfg is None:
+            return
+
+        repo_or_org_name = cfg.GitHubURL.removeprefix("https://github.com/")
+        if "/" in repo_or_org_name:
+            repo = gh.repo(repo_or_org_name)
+            subprocess.check_call(
+                [self.listener, "remove", "--token", repo.runner_remove_token()]
+            )
+        else:
+            org = gh.org(repo_or_org_name)
+            subprocess.check_call(
+                [self.listener, "remove", "--token", org.runner_remove_token()]
+            )
+
+    def register_for_repo(self, repo: Repository) -> None:
+        subprocess.check_call(
+            [
+                self.listener,
+                "configure",
+                "--unattended",
+                "--disableupdate",
+                "--token",
+                repo.runner_registration_token(),
+                "--url",
+                repo.URL,
+            ]
+        )
+
+    def register_for_org(self, org: Organization) -> None:
+        subprocess.check_call(
+            [
+                self.listener,
+                "configure",
+                "--unattended",
+                "--disableupdate",
+                "--token",
+                org.runner_registration_token(),
+                "--url",
+                org.URL,
+            ]
+        )
+
+
+class SnapConfig:
+    """Model for the configuration of the github-runner snap."""
+
+    def __init__(self, snapctl: SnapCtl):
+        self.snapctl = snapctl
+
+    @property
+    def personal_access_token(self) -> str:
+        try:
+            return self.snapctl.get("personal-access-token")
+        except subprocess.CalledProcessError:
+            return ""
+
+    @property
+    def repository(self) -> str:
+        try:
+            return self.snapctl.get("repository")
+        except subprocess.CalledProcessError:
+            return ""
+
+    @property
+    def organization(self) -> str:
+        try:
+            return self.snapctl.get("organization")
+        except subprocess.CalledProcessError:
+            return ""
+
+
+class SnapHook:
+    def __init__(self) -> None:
+        try:
+            snap_common = os.environ["SNAP_COMMON"]
+        except KeyError:
+            raise SystemExit("Snap hooks are meant to be called from inside the snap")
+
+        self.runner = Runner(root_dir=snap_common)
+        self.snapctl = SnapCtl()
+        self.cfg = SnapConfig(self.snapctl)
+
+    def dispatch(self, name: str) -> None:
+        if name == "configure":
+            self.configure()
+        elif name == "install":
+            self.install()
+        elif name == "remove":
+            self.remove()
+        else:
+            raise ValueError("unknown hook: {}".format(name))
+
+    def configure(self) -> None:
+        # When the access token is not available, the configuration system
+        # cannot be used for anything. Manual setup is still possible, but not
+        # handled with hooks.
+        pat = self.cfg.personal_access_token
+        if pat == "":
+            return
+
+        gh = GitHub(pat)
+
+        repo_name = self.cfg.repository
+        org_name = self.cfg.organization
+
+        if repo_name == "" and org_name == "":
+            self.runner.unregister(gh)
+            self.snapctl.stop("github-runner", disable=True)
+        elif repo_name != "" and org_name == "":
+            repo = gh.repo(repo_name)
+            if repo.URL != self.runner.configuredURL:
+                self.runner.unregister(gh)
+                self.runner.register_for_repo(repo)
+                self.snapctl.start("github-runner", enable=True)
+        elif repo_name == "" and org_name != "":
+            org = gh.org(org_name)
+            if org.URL != self.runner.configuredURL:
+                self.runner.unregister(gh)
+                self.runner.register_for_org(org)
+                self.snapctl.start("github-runner", enable=True)
+        else:
+            print(
+                """
+Please do not set both organization and repository, since the GitHub runner is unable
+to service both at the same time. Unset one of the values before proceeding.
+"""
+            )
+            raise SystemExit(1)  # Show output to the user.
+
+    def install(self) -> None:
+        pass
+
+    def remove(self) -> None:
+        pat = self.cfg.personal_access_token
+        if pat == "":
+            return
+
+        # The service is stopped by snapd, so we don't have to stop it here.
+
+        gh = GitHub(pat)
+        self.runner.unregister(gh)
+
+
+def main() -> None:
+    hook_name = os.path.basename(sys.argv[0])
+    SnapHook().dispatch(hook_name)
+
+
+if __name__ == "__main__":
+    main()

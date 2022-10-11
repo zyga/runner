@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Zygmunt Krynicki <me@zygoon.pl>
+# SPDX-License-Identifier: MIT
+
+name: github-runner
+summary: Runner for GitHub Actions
+description: |
+  Experimental runner for GitHub Actions.
+
+  Please visit https://github.com/settings/tokens to generate a personal access
+  token with scope admin:org or repo:org, and store it in the snap
+  configuration system with:
+
+      sudo snap set github-runner personal-access-token=...
+
+  Personal access token is used to generate GitHub runner registration and
+  de-registration tokens.
+
+  The runner can be pointed at any repository you have access to with:
+
+      sudo snap set github-runner repository=person/repo
+
+  The runner can also service an entire organization with:
+
+      sudo snap set github-runner organization=name
+
+  You can also unset those variables to remove runner registration. This is
+  done automatically before the snap is removed.
+
+  The service is started and stopped automatically when configured correctly.
+base: core22
+adopt-info: actions-runner
+confinement: classic
+
+parts:
+  actions-runner:
+    plugin: nil
+    source: .
+    build-packages:
+      - libicu70
+      - curl
+    override-build: |
+      craftctl set grade=devel
+      craftctl set version=$(cat src/runnerversion)
+      ( cd src && ./dev.sh b && ./dev.sh l && ./dev.sh p )
+      tar -zxf "_package/actions-runner-linux-$(uname -m | sed -e 's/x86_64/x64/' -e 's/aarch64/arm64/')-$(craftctl get version).tar.gz" -C "$CRAFT_PART_INSTALL"
+
+apps:
+  github-runner:
+    command: ./bin/Runner.Listener run --startuptype service
+    restart-condition: on-failure
+    install-mode: disable
+    daemon: simple
+  manual-setup:
+    command: ./bin/Runner.Listener

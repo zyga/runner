@@ -1,6 +1,2 @@
-#!/bin/bash
-
-SECONDS=0
-while [[ $SECONDS != $1 ]]; do
-    :
-done
+#!/bin/sh
+exec sleep "$1"
